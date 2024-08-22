@@ -36,16 +36,19 @@ def get_bairros():
   return run_query(query)
 
 @st.cache_data(ttl=3600)
-def get_chamados_por_bairro(bairro_id):
+def get_chamados_por_bairro(bairro_id, data_inicio, data_fim):
   query = f"""
   SELECT 
       tipo,
       status,
-      latitude,
-      longitude
+      CAST(latitude AS FLOAT64) as latitude,
+      CAST(longitude AS FLOAT64) as longitude,
+      data_inicio
   FROM `datario.adm_central_atendimento_1746.chamado`
   WHERE id_bairro = '{bairro_id}'
-  AND data_inicio >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  AND data_inicio BETWEEN '{data_inicio}' AND '{data_fim}'
+  AND latitude IS NOT NULL
+  AND longitude IS NOT NULL
   """
   return run_query(query)
 
@@ -135,7 +138,18 @@ def analise_por_bairro():
   bairro_selecionado = st.selectbox("Selecione um bairro:", bairros_df['nome'].unique())
   bairro_id = bairros_df[bairros_df['nome'] == bairro_selecionado]['id_bairro'].iloc[0]
   
-  chamados_bairro = get_chamados_por_bairro(bairro_id)
+  # Seleção de intervalo de datas
+  col1, col2 = st.columns(2)
+  with col1:
+      data_fim = st.date_input("Data Final", datetime.now().date())
+  with col2:
+      data_inicio = st.date_input("Data Inicial", data_fim - timedelta(days=30))
+  
+  if data_inicio > data_fim:
+      st.error("A data inicial deve ser anterior à data final.")
+      return
+  
+  chamados_bairro = get_chamados_por_bairro(bairro_id, data_inicio, data_fim)
   
   # Métricas do bairro
   total_chamados_bairro = len(chamados_bairro)
@@ -151,11 +165,26 @@ def analise_por_bairro():
                      title=f'Distribuição de Tipos de Chamados em {bairro_selecionado}')
   st.plotly_chart(fig_tipos)
   
-  # Mapa de calor dos chamados no bairro
-  fig_mapa = px.density_mapbox(chamados_bairro, lat='latitude', lon='longitude', zoom=12,
-                               mapbox_style="stamen-terrain",
-                               title=f'Mapa de Calor dos Chamados em {bairro_selecionado}')
-  st.plotly_chart(fig_mapa)
+  # Verificar se há dados de latitude e longitude válidos
+  valid_coords = chamados_bairro.dropna(subset=['latitude', 'longitude'])
+  if len(valid_coords) > 0:
+      # Mapa de pins coloridos por tipo de chamado
+      fig_mapa = px.scatter_mapbox(valid_coords, 
+                                   lat='latitude', 
+                                   lon='longitude',
+                                   color='tipo',
+                                   hover_data=['status', 'data_inicio'],
+                                   zoom=11,
+                                   mapbox_style="open-street-map",
+                                   title=f'Mapa de Chamados em {bairro_selecionado}')
+      fig_mapa.update_traces(marker=dict(size=10))
+      st.plotly_chart(fig_mapa)
+  else:
+      st.warning("Não há dados de localização disponíveis para este bairro no período selecionado.")
+
+  # Exibir dados brutos (opcional)
+  if st.checkbox("Mostrar dados brutos"):
+      st.write(chamados_bairro)
 
 # Função para o dashboard de impacto de eventos
 def impacto_eventos():
