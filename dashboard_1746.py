@@ -53,11 +53,26 @@ def get_chamados_por_bairro(bairro_id, data_inicio, data_fim):
   return run_query(query)
 
 @st.cache_data(ttl=3600)
+def get_chamados_geral(data_inicio, data_fim):
+  query = f"""
+  SELECT 
+      tipo,
+      status,
+      CAST(latitude AS FLOAT64) as latitude,
+      CAST(longitude AS FLOAT64) as longitude,
+      data_inicio
+  FROM `datario.adm_central_atendimento_1746.chamado`
+  WHERE data_inicio BETWEEN '{data_inicio}' AND '{data_fim}'
+  AND latitude IS NOT NULL
+  AND longitude IS NOT NULL
+  """
+  return run_query(query)
+
+@st.cache_data(ttl=3600)
 def get_eventos():
   query = """
   SELECT *
   FROM `datario.turismo_fluxo_visitantes.rede_hoteleira_ocupacao_eventos`
-  WHERE data_inicial >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 YEAR)
   """
   return run_query(query)
 
@@ -65,11 +80,11 @@ def get_eventos():
 def get_chamados_por_periodo(data_inicial, data_final):
   query = f"""
   SELECT 
-      categoria,
+      tipo,
       COUNT(*) as contagem
   FROM `datario.adm_central_atendimento_1746.chamado`
   WHERE data_inicio BETWEEN '{data_inicial}' AND '{data_final}'
-  GROUP BY categoria
+  GROUP BY tipo
   """
   return run_query(query)
 
@@ -77,7 +92,7 @@ def get_chamados_por_periodo(data_inicial, data_final):
 st.sidebar.title("Navegação")
 dashboard_selection = st.sidebar.radio(
   "Escolha um dashboard:",
-  ["Visão Geral dos Chamados", "Análise por Bairro", "Impacto de Eventos"]
+  ["Visão Geral dos Chamados", "Análise por Bairro", "Mapa Geral de Chamados", "Impacto de Eventos"]
 )
 
 # Função para o dashboard de visão geral dos chamados
@@ -186,6 +201,59 @@ def analise_por_bairro():
   if st.checkbox("Mostrar dados brutos"):
       st.write(chamados_bairro)
 
+# Função para o dashboard de mapa geral de chamados
+def mapa_geral_chamados():
+  st.title("Mapa Geral de Chamados")
+  
+  # Seleção de intervalo de datas
+  col1, col2 = st.columns(2)
+  with col1:
+      data_fim = st.date_input("Data Final", datetime.now().date())
+  with col2:
+      data_inicio = st.date_input("Data Inicial", data_fim - timedelta(days=30))
+  
+  if data_inicio > data_fim:
+      st.error("A data inicial deve ser anterior à data final.")
+      return
+  
+  chamados_geral = get_chamados_geral(data_inicio, data_fim)
+  
+  # Métricas gerais
+  total_chamados = len(chamados_geral)
+  chamados_abertos = chamados_geral[chamados_geral['status'] == 'ABERTO'].shape[0]
+  chamados_fechados = chamados_geral[chamados_geral['status'] == 'FECHADO'].shape[0]
+  
+  col1, col2, col3 = st.columns(3)
+  col1.metric("Total de Chamados", total_chamados)
+  col2.metric("Chamados Abertos", chamados_abertos)
+  col3.metric("Chamados Fechados", chamados_fechados)
+  
+  # Gráfico de pizza para tipos de chamados
+  tipos_chamados = chamados_geral['tipo'].value_counts().nlargest(10)
+  fig_tipos = px.pie(values=tipos_chamados.values, names=tipos_chamados.index,
+                     title='Top 10 Tipos de Chamados')
+  st.plotly_chart(fig_tipos)
+  
+  # Mapa de pins coloridos por tipo de chamado
+  if not chamados_geral.empty:
+      fig_mapa = px.scatter_mapbox(chamados_geral, 
+                                   lat='latitude', 
+                                   lon='longitude',
+                                   color='tipo',
+                                   hover_data=['status', 'data_inicio'],
+                                   zoom=10,
+                                   mapbox_style="open-street-map",
+                                   title='Mapa Geral de Chamados')
+      fig_mapa.update_traces(marker=dict(size=5))  # Reduzimos o tamanho dos marcadores devido à maior quantidade de pontos
+      st.plotly_chart(fig_mapa)
+  else:
+      st.warning("Não há dados de localização disponíveis para o período selecionado.")
+
+  # Exibir dados brutos (opcional)
+  if st.checkbox("Mostrar dados brutos"):
+      st.write(chamados_geral)
+
+
 # Função para o dashboard de impacto de eventos
 def impacto_eventos():
   st.title("Impacto de Eventos na Cidade")
@@ -199,13 +267,13 @@ def impacto_eventos():
   evento_dados = eventos_df[eventos_df['evento'] == evento_selecionado].iloc[0]
   
   # Métricas do evento
-  st.metric("Taxa de Ocupação Hoteleira", f"{evento_dados['taxa_ocupacao']:.2f}%")
+  st.metric("Taxa de Ocupação Hoteleira", f"{100 * evento_dados['taxa_ocupacao']:.2f}%")
   
   # Chamados durante o evento
   chamados_evento = get_chamados_por_periodo(evento_dados['data_inicial'], evento_dados['data_final'])
   
   # Gráfico de barras para categorias de chamados durante o evento
-  fig_categorias_evento = px.bar(chamados_evento.nlargest(10, 'contagem'), x='categoria', y='contagem',
+  fig_categorias_evento = px.bar(chamados_evento.nlargest(10, 'contagem'), x='tipo', y='contagem',
                                  title=f'Top 10 Categorias de Chamados Durante {evento_selecionado}')
   st.plotly_chart(fig_categorias_evento)
   
@@ -230,5 +298,7 @@ if dashboard_selection == "Visão Geral dos Chamados":
   visao_geral_chamados()
 elif dashboard_selection == "Análise por Bairro":
   analise_por_bairro()
+elif dashboard_selection == "Mapa Geral de Chamados":
+  mapa_geral_chamados()
 elif dashboard_selection == "Impacto de Eventos":
   impacto_eventos()
