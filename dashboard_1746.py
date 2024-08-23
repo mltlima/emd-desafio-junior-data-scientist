@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import basedosdados as bd
 from datetime import datetime, timedelta
+import calendar
 
 # Configuração inicial
 st.set_page_config(page_title="Dashboard Rio de Janeiro", layout="wide")
@@ -88,11 +90,27 @@ def get_chamados_por_periodo(data_inicial, data_final):
   """
   return run_query(query)
 
+@st.cache_data(ttl=3600)
+def get_chamados_tendencias(data_inicio, data_fim):
+  query = f"""
+  SELECT 
+      DATE(data_inicio) as data,
+      EXTRACT(HOUR FROM data_inicio) as hora,
+      EXTRACT(DAYOFWEEK FROM data_inicio) as dia_semana,
+      EXTRACT(MONTH FROM data_inicio) as mes,
+      tipo,
+      COUNT(*) as contagem
+  FROM `datario.adm_central_atendimento_1746.chamado`
+  WHERE data_inicio BETWEEN '{data_inicio}' AND '{data_fim}'
+  GROUP BY data, hora, dia_semana, mes, tipo
+  """
+  return run_query(query)
+
 # Sidebar para seleção de dashboard
 st.sidebar.title("Navegação")
 dashboard_selection = st.sidebar.radio(
   "Escolha um dashboard:",
-  ["Visão Geral dos Chamados", "Análise por Bairro", "Mapa Geral de Chamados", "Impacto de Eventos"]
+  ["Visão Geral dos Chamados", "Análise por Bairro", "Mapa Geral de Chamados", "Tendências Temporais", "Impacto de Eventos"]
 )
 
 # Função para o dashboard de visão geral dos chamados
@@ -293,6 +311,67 @@ def impacto_eventos():
                           title=f'Comparação de Chamados: Antes, Durante e Depois de {evento_selecionado}')
   st.plotly_chart(fig_comparacao)
 
+# Dashboard de tendências temporais
+def dashboard_tendencias_temporais():
+  st.title("Dashboard de Tendências Temporais")
+  
+  # Seleção de intervalo de datas
+  col1, col2 = st.columns(2)
+  with col1:
+      data_fim = st.date_input("Data Final", datetime.now().date())
+  with col2:
+      data_inicio = st.date_input("Data Inicial", data_fim - timedelta(days=180))  # Padrão para 6 meses
+  
+  if data_inicio > data_fim:
+      st.error("A data inicial deve ser anterior à data final.")
+      return
+  
+  chamados_tendencias = get_chamados_tendencias(data_inicio, data_fim)
+  
+  # 1. Gráfico de linha mostrando a evolução dos chamados ao longo do tempo
+  chamados_diarios = chamados_tendencias.groupby('data')['contagem'].sum().reset_index()
+  fig_evolucao = px.line(chamados_diarios, x='data', y='contagem',
+                         title='Evolução Diária dos Chamados')
+  st.plotly_chart(fig_evolucao)
+  
+  # 2. Heatmap dos chamados por hora do dia e dia da semana
+  heatmap_data = chamados_tendencias.groupby(['dia_semana', 'hora'])['contagem'].sum().reset_index()
+  heatmap_data = heatmap_data.pivot(index='dia_semana', columns='hora', values='contagem')
+  
+  dias_semana = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
+  heatmap_data.index = dias_semana
+  
+  fig_heatmap = go.Figure(data=go.Heatmap(
+                 z=heatmap_data.values,
+                 x=heatmap_data.columns,
+                 y=heatmap_data.index,
+                 colorscale='Viridis'))
+  
+  fig_heatmap.update_layout(
+      title='Heatmap de Chamados por Hora e Dia da Semana',
+      xaxis_title='Hora do Dia',
+      yaxis_title='Dia da Semana'
+  )
+  st.plotly_chart(fig_heatmap)
+  
+  # 3. Análise mensal dos tipos de chamados
+  chamados_mensais = chamados_tendencias.groupby(['mes', 'tipo'])['contagem'].sum().reset_index()
+  top_tipos = chamados_mensais.groupby('tipo')['contagem'].sum().nlargest(5).index
+  chamados_mensais_top = chamados_mensais[chamados_mensais['tipo'].isin(top_tipos)]
+  
+  chamados_mensais_top['mes'] = chamados_mensais_top['mes'].apply(lambda x: calendar.month_abbr[x])
+  
+  fig_mensal = px.line(chamados_mensais_top, x='mes', y='contagem', color='tipo',
+                       title='Tendência Mensal dos Top 5 Tipos de Chamados')
+  fig_mensal.update_xaxes(categoryorder='array', categoryarray=list(calendar.month_abbr)[1:])
+  st.plotly_chart(fig_mensal)
+  
+  # 4. Distribuição dos tipos de chamados
+  tipos_chamados = chamados_tendencias.groupby('tipo')['contagem'].sum().nlargest(10).reset_index()
+  fig_tipos = px.pie(tipos_chamados, values='contagem', names='tipo',
+                     title='Top 10 Tipos de Chamados')
+  st.plotly_chart(fig_tipos)
+
 # Renderizando o dashboard selecionado
 if dashboard_selection == "Visão Geral dos Chamados":
   visao_geral_chamados()
@@ -300,5 +379,7 @@ elif dashboard_selection == "Análise por Bairro":
   analise_por_bairro()
 elif dashboard_selection == "Mapa Geral de Chamados":
   mapa_geral_chamados()
+elif dashboard_selection == "Tendências Temporais":
+  dashboard_tendencias_temporais()
 elif dashboard_selection == "Impacto de Eventos":
   impacto_eventos()
