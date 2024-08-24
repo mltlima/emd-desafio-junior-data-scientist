@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import basedosdados as bd
 from datetime import datetime, timedelta
 import calendar
+import requests
 
 # Configuração inicial
 st.set_page_config(page_title="Dashboard Rio de Janeiro", layout="wide")
@@ -106,11 +107,46 @@ def get_chamados_tendencias(data_inicio, data_fim):
   """
   return run_query(query)
 
+@st.cache_data(ttl=3600)
+def get_chamados(data_inicio, data_fim):
+  query = f"""
+  SELECT 
+      DATE(data_inicio) as data,
+      tipo,
+      COUNT(*) as contagem_chamados
+  FROM `datario.adm_central_atendimento_1746.chamado`
+  WHERE data_inicio BETWEEN '{data_inicio}' AND '{data_fim}'
+  GROUP BY data, tipo
+  """
+  df = run_query(query)
+  df['data'] = pd.to_datetime(df['data'])  # Ensure 'data' is datetime
+  return df
+
+@st.cache_data(ttl=3600)
+def get_weather_data(start_date, end_date):
+  latitude = -22.9068
+  longitude = -43.1729
+  
+  url = f"https://archive-api.open-meteo.com/v1/archive?latitude={latitude}&longitude={longitude}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_mean,precipitation_sum&timezone=America%2FSao_Paulo"
+  
+  response = requests.get(url)
+  data = response.json()
+  
+  df = pd.DataFrame({
+      'data': pd.to_datetime(data['daily']['time']),
+      'temperatura_media': data['daily']['temperature_2m_mean'],
+      'precipitacao': data['daily']['precipitation_sum']
+  })
+  
+  return df
+
+
 # Sidebar para seleção de dashboard
 st.sidebar.title("Navegação")
 dashboard_selection = st.sidebar.radio(
   "Escolha um dashboard:",
-  ["Visão Geral dos Chamados", "Análise por Bairro", "Mapa Geral de Chamados", "Tendências Temporais", "Impacto de Eventos"]
+  ["Visão Geral dos Chamados", "Análise por Bairro", "Mapa Geral de Chamados", 
+   "Tendências Temporais", "Impacto Climático", "Impacto de Eventos"]
 )
 
 # Função para o dashboard de visão geral dos chamados
@@ -372,6 +408,87 @@ def dashboard_tendencias_temporais():
                      title='Top 10 Tipos de Chamados')
   st.plotly_chart(fig_tipos)
 
+
+def dashboard_impacto_climatico():
+  st.title("Dashboard de Impacto Climático")
+  
+  col1, col2 = st.columns(2)
+  with col1:
+      data_fim = st.date_input("Data Final", datetime.now().date())
+  with col2:
+      data_inicio = st.date_input("Data Inicial", data_fim - timedelta(days=30))
+  
+  if data_inicio > data_fim:
+      st.error("A data inicial deve ser anterior à data final.")
+      return
+  
+  chamados = get_chamados(data_inicio, data_fim)
+  clima = get_weather_data(data_inicio, data_fim)
+  
+  chamados_clima = pd.merge(chamados, clima, on='data')
+  chamados_diarios = chamados_clima.groupby('data').agg({
+    'contagem_chamados': 'sum',
+    'temperatura_media': 'mean',
+    'precipitacao': 'mean'
+  }).reset_index()
+  
+  fig_temp = go.Figure()
+  fig_temp.add_trace(go.Scatter(x=chamados_diarios['data'], y=chamados_diarios['contagem_chamados'],
+                                name='Chamados', yaxis='y1'))
+  fig_temp.add_trace(go.Scatter(x=chamados_diarios['data'], y=chamados_diarios['temperatura_media'],
+                                name='Temperatura Média', yaxis='y2'))
+
+  fig_temp.update_layout(
+    title='Relação entre Chamados e Temperatura',
+    xaxis_title='Data',
+    yaxis_title='Número de Chamados',
+    yaxis2=dict(
+        title='Temperatura Média (°C)',
+        overlaying='y',
+        side='right'
+    )
+  )
+  st.plotly_chart(fig_temp)
+  
+  fig_precip = px.scatter(chamados_diarios, x='precipitacao', y='contagem_chamados',
+                          title='Relação entre Chamados e Precipitação',
+                          labels={'precipitacao': 'Precipitação (mm)', 'contagem_chamados': 'Número de Chamados'})
+  st.plotly_chart(fig_precip)
+  
+  # Group by 'tipo' and temperature bins, then calculate the mean
+  chamados_temp = chamados_clima.groupby(['tipo', pd.cut(chamados_clima['temperatura_media'], bins=5)])['contagem_chamados'].mean().unstack()
+  
+  # Convert Interval index to string for better JSON serialization
+  chamados_temp.columns = chamados_temp.columns.astype(str)
+  
+  # Handle NAType by filling with 0 or another placeholder
+  chamados_temp = chamados_temp.fillna(0)
+  
+  # Create the heatmap
+  fig_heatmap = px.imshow(
+      chamados_temp,
+      labels=dict(x="Faixa de Temperatura", y="Tipo de Chamado", color="Média de Chamados"),
+      title="Heatmap: Tipos de Chamados vs. Temperatura"
+  )
+  
+  # Display the heatmap
+  st.plotly_chart(fig_heatmap)
+  
+  corr_temp = chamados_diarios['contagem_chamados'].corr(chamados_diarios['temperatura_media'])
+  corr_precip = chamados_diarios['contagem_chamados'].corr(chamados_diarios['precipitacao'])
+  
+  st.subheader("Análise de Correlação")
+  col1, col2 = st.columns(2)
+  col1.metric("Correlação Chamados vs. Temperatura", f"{corr_temp:.2f}")
+  col2.metric("Correlação Chamados vs. Precipitação", f"{corr_precip:.2f}")
+  
+  dias_chuvosos = chamados_clima[chamados_clima['precipitacao'] > 10]
+  top_tipos_chuva = dias_chuvosos.groupby('tipo')['contagem_chamados'].sum().nlargest(5).reset_index()
+  
+  fig_top_chuva = px.bar(top_tipos_chuva, x='tipo', y='contagem_chamados',
+                         title='Top 5 Tipos de Chamados em Dias Chuvosos')
+  st.plotly_chart(fig_top_chuva)
+
 # Renderizando o dashboard selecionado
 if dashboard_selection == "Visão Geral dos Chamados":
   visao_geral_chamados()
@@ -381,5 +498,7 @@ elif dashboard_selection == "Mapa Geral de Chamados":
   mapa_geral_chamados()
 elif dashboard_selection == "Tendências Temporais":
   dashboard_tendencias_temporais()
+elif dashboard_selection == "Impacto Climático":
+  dashboard_impacto_climatico()
 elif dashboard_selection == "Impacto de Eventos":
   impacto_eventos()
