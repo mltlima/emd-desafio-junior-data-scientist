@@ -450,21 +450,52 @@ def dashboard_impacto_climatico():
   )
   st.plotly_chart(fig_temp)
   
-  fig_precip = px.scatter(chamados_diarios, x='precipitacao', y='contagem_chamados',
-                          title='Relação entre Chamados e Precipitação',
-                          labels={'precipitacao': 'Precipitação (mm)', 'contagem_chamados': 'Número de Chamados'})
+  # Gráfico de Chamados vs. Precipitação
+  dias_com_chuva = chamados_diarios[chamados_diarios['precipitacao'] > 0]
+  fig_precip = go.Figure()
+  fig_precip.add_trace(go.Scatter(
+      x=dias_com_chuva['precipitacao'],
+      y=dias_com_chuva['contagem_chamados'],
+      mode='markers',
+      marker=dict(
+          size=dias_com_chuva['contagem_chamados'] / 10,
+          sizemode='area',
+          sizeref=2.*max(dias_com_chuva['contagem_chamados'])/(40.**2),
+          sizemin=4
+      ),
+      text=dias_com_chuva['data'],
+      hovertemplate='Data: %{text}<br>Precipitação: %{x:.1f}mm<br>Chamados: %{y}<extra></extra>'
+  ))
+  fig_precip.update_layout(
+      title='Relação entre Chamados e Precipitação (Dias com Chuva)',
+      xaxis_title='Precipitação (mm)',
+      yaxis_title='Número de Chamados'
+  )
   st.plotly_chart(fig_precip)
   
-  # Group by 'tipo' and temperature bins, then calculate the mean
-  chamados_temp = chamados_clima.groupby(['tipo', pd.cut(chamados_clima['temperatura_media'], bins=5)])['contagem_chamados'].mean().unstack()
-  
-  # Convert Interval index to string for better JSON serialization
-  chamados_temp.columns = chamados_temp.columns.astype(str)
-  
-  # Handle NAType by filling with 0 or another placeholder
-  chamados_temp = chamados_temp.fillna(0)
+  # Categorização da precipitação
+  def categorizar_precipitacao(valor):
+      if valor == 0:
+          return 'Sem chuva'
+      elif valor <= 5:
+          return 'Chuva leve'
+      elif valor <= 25:
+          return 'Chuva moderada'
+      else:
+          return 'Chuva forte'
+
+  chamados_diarios['categoria_precipitacao'] = chamados_diarios['precipitacao'].apply(categorizar_precipitacao)
+  media_por_categoria = chamados_diarios.groupby('categoria_precipitacao')['contagem_chamados'].mean().reset_index()
+
+  fig_categoria = px.bar(media_por_categoria, x='categoria_precipitacao', y='contagem_chamados',
+                         title='Média de Chamados por Categoria de Precipitação')
+  st.plotly_chart(fig_categoria)
   
   # Create the heatmap
+  chamados_temp = chamados_clima.groupby(['tipo', pd.cut(chamados_clima['temperatura_media'], bins=5)])['contagem_chamados'].mean().unstack()
+  chamados_temp.columns = chamados_temp.columns.astype(str)
+  chamados_temp = chamados_temp.fillna(0)
+
   fig_heatmap = px.imshow(
       chamados_temp,
       labels=dict(x="Faixa de Temperatura", y="Tipo de Chamado", color="Média de Chamados"),
@@ -473,14 +504,6 @@ def dashboard_impacto_climatico():
   
   # Display the heatmap
   st.plotly_chart(fig_heatmap)
-  
-  corr_temp = chamados_diarios['contagem_chamados'].corr(chamados_diarios['temperatura_media'])
-  corr_precip = chamados_diarios['contagem_chamados'].corr(chamados_diarios['precipitacao'])
-  
-  st.subheader("Análise de Correlação")
-  col1, col2 = st.columns(2)
-  col1.metric("Correlação Chamados vs. Temperatura", f"{corr_temp:.2f}")
-  col2.metric("Correlação Chamados vs. Precipitação", f"{corr_precip:.2f}")
   
   dias_chuvosos = chamados_clima[chamados_clima['precipitacao'] > 10]
   top_tipos_chuva = dias_chuvosos.groupby('tipo')['contagem_chamados'].sum().nlargest(5).reset_index()
