@@ -1,4 +1,6 @@
 import streamlit as st
+import os
+from dotenv import load_dotenv
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -10,7 +12,8 @@ import requests
 # Configuração inicial
 st.set_page_config(page_title="Dashboard Rio de Janeiro", layout="wide")
 
-billing_project_id = "dados-rio-433101"
+load_dotenv()
+billing_project_id = os.environ['billing_project_id']
 
 # Função para executar queries
 @st.cache_data(ttl=3600)
