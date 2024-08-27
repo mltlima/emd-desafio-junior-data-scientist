@@ -1,6 +1,6 @@
 streamlit
 pandas
-markupsafe<2.1.0
+markupsafe==2.0.1
 plotly
 requests
 basedosdados
