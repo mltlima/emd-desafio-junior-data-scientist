@@ -5,3 +5,6 @@ plotly
 requests
 basedosdados
 python-dotenv
+matplotlib
+seaborn
+calmap
