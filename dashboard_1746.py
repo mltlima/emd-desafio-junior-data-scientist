@@ -86,11 +86,12 @@ def get_eventos():
 def get_chamados_por_periodo(data_inicial, data_final):
   query = f"""
   SELECT 
+      DATE(data_inicio) as data,
       tipo,
       COUNT(*) as contagem
   FROM `datario.adm_central_atendimento_1746.chamado`
   WHERE data_inicio BETWEEN '{data_inicial}' AND '{data_final}'
-  GROUP BY tipo
+  GROUP BY data, tipo
   """
   return run_query(query)
 
@@ -143,13 +144,23 @@ def get_weather_data(start_date, end_date):
   
   return df
 
+@st.cache_data(ttl=3600*24)
+def get_holidays(year):
+  url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/BR"
+  response = requests.get(url)
+  if response.status_code == 200:
+      return pd.DataFrame(response.json())
+  else:
+      st.error(f"Erro ao obter feriados: {response.status_code}")
+      return pd.DataFrame()
+
 
 # Sidebar para seleção de dashboard
 st.sidebar.title("Navegação")
 dashboard_selection = st.sidebar.radio(
   "Escolha um dashboard:",
   ["Visão Geral dos Chamados", "Análise por Bairro", "Mapa Geral de Chamados", 
-   "Tendências Temporais", "Impacto Climático", "Impacto de Eventos"]
+   "Tendências Temporais", "Impacto Climático", "Impacto de Eventos", "Impacto de Feriados nos Chamados"]
 )
 
 # Função para o dashboard de visão geral dos chamados
@@ -326,29 +337,101 @@ def impacto_eventos():
   # Métricas do evento
   st.metric("Taxa de Ocupação Hoteleira", f"{100 * evento_dados['taxa_ocupacao']:.2f}%")
   
+  # Definindo períodos para análise
+  data_inicial = evento_dados['data_inicial']
+  data_final = evento_dados['data_final']
+  dias_antes = (data_inicial - timedelta(days=7)).strftime('%Y-%m-%d')
+  dias_depois = (data_final + timedelta(days=7)).strftime('%Y-%m-%d')
+  
+  # Obtendo dados climáticos
+  clima_dados = get_weather_data(dias_antes, dias_depois)
+  clima_dados['data'] = pd.to_datetime(clima_dados['data'])
+  
   # Chamados durante o evento
-  chamados_evento = get_chamados_por_periodo(evento_dados['data_inicial'], evento_dados['data_final'])
+  chamados_evento = get_chamados_por_periodo(data_inicial, data_final)
+  chamados_antes = get_chamados_por_periodo(dias_antes, data_inicial)
+  chamados_depois = get_chamados_por_periodo(data_final, dias_depois)
   
   # Gráfico de barras para categorias de chamados durante o evento
-  fig_categorias_evento = px.bar(chamados_evento.nlargest(10, 'contagem'), x='tipo', y='contagem',
-                                 title=f'Top 10 Categorias de Chamados Durante {evento_selecionado}')
-  st.plotly_chart(fig_categorias_evento)
+  if 'tipo' in chamados_evento.columns and 'contagem' in chamados_evento.columns:
+      chamados_evento_total = chamados_evento.groupby('tipo')['contagem'].sum().reset_index()
+      fig_categorias_evento = px.bar(chamados_evento_total.nlargest(10, 'contagem'), x='tipo', y='contagem',
+                                     title=f'Top 10 Categorias de Chamados Durante {evento_selecionado}')
+      st.plotly_chart(fig_categorias_evento)
+  else:
+      st.warning("Dados insuficientes para gerar o gráfico de categorias de chamados.")
   
   # Comparação de chamados antes, durante e depois do evento
-  dias_antes = (evento_dados['data_inicial'] - pd.Timedelta(days=7)).strftime('%Y-%m-%d')
-  dias_depois = (evento_dados['data_final'] + pd.Timedelta(days=7)).strftime('%Y-%m-%d')
-  
-  chamados_antes = get_chamados_por_periodo(dias_antes, evento_dados['data_inicial'])
-  chamados_depois = get_chamados_por_periodo(evento_dados['data_final'], dias_depois)
+  chamados_antes_total = chamados_antes['contagem'].sum() if 'contagem' in chamados_antes.columns else 0
+  chamados_evento_total = chamados_evento['contagem'].sum() if 'contagem' in chamados_evento.columns else 0
+  chamados_depois_total = chamados_depois['contagem'].sum() if 'contagem' in chamados_depois.columns else 0
   
   comparacao_df = pd.DataFrame({
       'Período': ['Antes', 'Durante', 'Depois'],
-      'Chamados': [chamados_antes['contagem'].sum(), chamados_evento['contagem'].sum(), chamados_depois['contagem'].sum()]
+      'Chamados': [chamados_antes_total, chamados_evento_total, chamados_depois_total]
   })
   
   fig_comparacao = px.bar(comparacao_df, x='Período', y='Chamados',
                           title=f'Comparação de Chamados: Antes, Durante e Depois de {evento_selecionado}')
   st.plotly_chart(fig_comparacao)
+  
+  # Gráfico de linha: Evolução dos chamados e temperatura durante o evento
+  chamados_diarios = pd.concat([chamados_antes, chamados_evento, chamados_depois])
+  
+  if 'data' in chamados_diarios.columns:
+      chamados_diarios['data'] = pd.to_datetime(chamados_diarios['data'])
+      chamados_diarios = chamados_diarios.groupby('data')['contagem'].sum().reset_index()
+      
+      clima_chamados = pd.merge(clima_dados, chamados_diarios, on='data', how='left')
+      clima_chamados['contagem'] = clima_chamados['contagem'].fillna(0)
+      
+      fig_evolucao = go.Figure()
+      
+      # Adicionando linha de chamados
+      fig_evolucao.add_trace(go.Scatter(
+          x=clima_chamados['data'],
+          y=clima_chamados['contagem'],
+          name='Número de Chamados',
+          yaxis='y1'
+      ))
+      
+      # Adicionando linha de temperatura
+      fig_evolucao.add_trace(go.Scatter(
+          x=clima_chamados['data'],
+          y=clima_chamados['temperatura_media'],
+          name='Temperatura Média',
+          yaxis='y2'
+      ))
+      
+      # Configurando o layout
+      fig_evolucao.update_layout(
+          title=f'Evolução de Chamados e Temperatura: {evento_selecionado}',
+          xaxis_title='Data',
+          yaxis=dict(title='Número de Chamados', side='left'),
+          yaxis2=dict(title='Temperatura (°C)', overlaying='y', side='right'),
+          legend=dict(x=0.01, y=0.99, orientation='h')
+      )
+      
+      # Destacando o período do evento
+      fig_evolucao.add_vrect(
+          x0=data_inicial, x1=data_final,
+          fillcolor="LightSalmon", opacity=0.5,
+          layer="below", line_width=0,
+      )
+      
+      st.plotly_chart(fig_evolucao)
+      
+      # Análise de correlação entre chamados e clima durante o evento
+      correlacao_temp = clima_chamados['contagem'].corr(clima_chamados['temperatura_media'])
+      correlacao_precip = clima_chamados['contagem'].corr(clima_chamados['precipitacao'])
+      
+      st.subheader("Análise de Correlação Durante o Evento")
+      col1, col2 = st.columns(2)
+      col1.metric("Correlação Chamados vs. Temperatura", f"{correlacao_temp:.2f}")
+      col2.metric("Correlação Chamados vs. Precipitação", f"{correlacao_precip:.2f}")
+  else:
+      st.warning("A coluna 'data' não está presente nos dados de chamados. Verifique a função get_chamados_por_periodo().")
+
 
 # Dashboard de tendências temporais
 def dashboard_tendencias_temporais():
@@ -515,6 +598,67 @@ def dashboard_impacto_climatico():
                          title='Top 5 Tipos de Chamados em Dias Chuvosos')
   st.plotly_chart(fig_top_chuva)
 
+
+def dashboard_impacto_feriados():
+  st.title("Impacto de Feriados nos Chamados")
+  
+  # Seleção de ano
+  year = st.selectbox("Selecione o ano", range(2020, datetime.now().year + 1))
+  
+  # Obter feriados e chamados
+  holidays = get_holidays(year)
+  chamados = get_chamados(f"{year}-01-01", f"{year}-12-31")
+  
+  # Processar dados
+  chamados['is_holiday'] = chamados['data'].isin(holidays['date'])
+  
+  # 1. Comparação de volume de chamados: feriados vs. dias normais
+  volume_comparison = chamados.groupby('is_holiday')['contagem_chamados'].mean().reset_index()
+  volume_comparison['is_holiday'] = volume_comparison['is_holiday'].map({True: 'Feriados', False: 'Dias Normais'})
+  
+  fig_volume = px.bar(volume_comparison, x='is_holiday', y='contagem_chamados',
+                      title='Média de Chamados: Feriados vs. Dias Normais',
+                      labels={'is_holiday': 'Tipo de Dia', 'contagem_chamados': 'Média de Chamados'})
+  st.plotly_chart(fig_volume)
+  
+  # 2. Top 10 tipos de chamados em feriados vs. dias normais (usando média diária)
+  top_tipos_feriados = chamados[chamados['is_holiday']].groupby('tipo')['contagem_chamados'].mean().nlargest(10)
+  top_tipos_normais = chamados[~chamados['is_holiday']].groupby('tipo')['contagem_chamados'].mean().nlargest(10)
+
+  fig_tipos = go.Figure()
+  fig_tipos.add_trace(go.Bar(x=top_tipos_feriados.index, y=top_tipos_feriados.values, name='Feriados'))
+  fig_tipos.add_trace(go.Bar(x=top_tipos_normais.index, y=top_tipos_normais.values, name='Dias Normais'))
+  fig_tipos.update_layout(
+    title='Top 10 Tipos de Chamados: Média Diária em Feriados vs. Dias Normais',
+    xaxis_title='Tipo de Chamado',
+    yaxis_title='Média Diária de Chamados',
+    barmode='group'
+  )
+  st.plotly_chart(fig_tipos)
+  
+  # 3. Análise de tipos de chamados mais comuns em feriados específicos
+  st.subheader("Tipos de Chamados Mais Comuns em Feriados Específicos")
+  for _, holiday in holidays.iterrows():
+      holiday_calls = chamados[chamados['data'] == holiday['date']]
+      if not holiday_calls.empty:
+          top_types = holiday_calls.groupby('tipo')['contagem_chamados'].sum().nlargest(5)
+          st.write(f"**{holiday['localName']} ({holiday['date']}):**")
+          st.write(top_types)
+          st.write("---")
+  
+  # 4. Gráfico de linha: Evolução dos chamados ao longo do ano, destacando feriados
+  chamados_diarios = chamados.groupby('data')['contagem_chamados'].sum().reset_index()
+  chamados_diarios['is_holiday'] = chamados_diarios['data'].isin(holidays['date'])
+  
+  fig_evolucao = px.line(chamados_diarios, x='data', y='contagem_chamados',
+                         title='Evolução dos Chamados ao Longo do Ano')
+  fig_evolucao.add_trace(go.Scatter(x=chamados_diarios[chamados_diarios['is_holiday']]['data'],
+                                    y=chamados_diarios[chamados_diarios['is_holiday']]['contagem_chamados'],
+                                    mode='markers',
+                                    name='Feriados',
+                                    marker=dict(size=10, color='red')))
+  st.plotly_chart(fig_evolucao)
+
 # Renderizando o dashboard selecionado
 if dashboard_selection == "Visão Geral dos Chamados":
   visao_geral_chamados()
@@ -528,3 +672,5 @@ elif dashboard_selection == "Impacto Climático":
   dashboard_impacto_climatico()
 elif dashboard_selection == "Impacto de Eventos":
   impacto_eventos()
+elif dashboard_selection == "Impacto de Feriados nos Chamados":
+  dashboard_impacto_feriados()
